@@ -38,6 +38,8 @@ pub struct MultivectorOffset {
 }
 
 impl quantization::encoded_storage::UniversalOffset for MultivectorOffset {
+    const MULTI_VECTOR: bool = true;
+
     fn start(self) -> PointOffsetType {
         self.start
     }

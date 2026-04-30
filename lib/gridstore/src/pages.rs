@@ -262,6 +262,7 @@ impl<S: UniversalRead<u8>> Pages<S> {
                 if pointer_opt.is_none() {
                     empty_values.push(value_idx);
                 }
+
                 pointer_opt.into_iter().flat_map(move |pointer| {
                     let len_bytes = pointer.length as usize;
                     let len_pages = Self::value_len_pages(pointer, config);

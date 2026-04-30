@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::cmp::max;
+use std::iter;
 use std::mem::MaybeUninit;
 use std::path::{Path, PathBuf};
 
@@ -7,7 +8,7 @@ use ahash::AHashMap;
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::fs::atomic_save_json;
 use common::generic_consts::{AccessPattern, Random, Sequential};
-use common::maybe_uninit::maybe_uninit_fill_from;
+use common::maybe_uninit::{assume_init_vec, maybe_uninit_fill_from};
 use common::mmap::{
     Advice, AdviceSetting, MULTI_MMAP_IS_SUPPORTED, MmapType, create_and_ensure_length,
     open_write_mmap,
@@ -372,6 +373,128 @@ impl<T: Sized + Copy + 'static, S: UniversalWrite<T>> ChunkedVectors<T, S> {
         UniversalRead::read_multi_iter::<Random, _>(reads)
             .expect("iterator initialized")
             .map(|result| result.expect("vector read"))
+    }
+
+    fn read_ranges_count(&self, offset: VectorOffsetType, count: usize) -> usize {
+        if count == 0 {
+            return 0;
+        }
+
+        let first_chunk = self.get_chunk_index(offset);
+        let last_chunk = self.get_chunk_index(offset + count - 1);
+        last_chunk - first_chunk + 1
+    }
+
+    fn read_ranges(
+        &self,
+        offset: VectorOffsetType,
+        count: usize,
+    ) -> impl Iterator<Item = (usize, usize, ReadRange)> {
+        let in_bounds = offset
+            .checked_add(count)
+            .is_some_and(|end| end <= self.status.len);
+
+        let mut current_offset = offset;
+        let mut remaining_count = count;
+        let mut write_offset = 0;
+
+        iter::from_fn(move || {
+            if !in_bounds || remaining_count == 0 {
+                return None;
+            }
+
+            let chunk_idx = self.get_chunk_index(current_offset);
+            debug_assert!(chunk_idx < self.chunks.len());
+
+            let element_offset = self.get_chunk_offset(current_offset);
+            let vectors_in_chunk =
+                self.config.chunk_size_vectors - element_offset / self.config.dim;
+            let vectors_to_read = remaining_count.min(vectors_in_chunk);
+
+            let elements_length = vectors_to_read * self.config.dim;
+            let range = ReadRange {
+                byte_offset: (element_offset * size_of::<T>()) as u64,
+                length: elements_length as u64,
+            };
+
+            let item_write_offset = write_offset;
+            current_offset += vectors_to_read;
+            remaining_count -= vectors_to_read;
+            write_offset += elements_length;
+
+            Some((item_write_offset, chunk_idx, range))
+        })
+    }
+
+    pub fn for_each_in_batch_splice<O, F>(&self, offsets: &[O], mut callback: F)
+    where
+        O: VectorOffset,
+        F: FnMut(usize, &[T]),
+    {
+        struct ReadMeta {
+            idx: usize,
+            write_offset: usize,
+            chunks: usize,
+            length: usize,
+        }
+
+        let reads = offsets.iter().enumerate().flat_map(move |(idx, offset)| {
+            let vector_offset = offset.offset();
+            let vectors_count = offset.multi_vector_count();
+            debug_assert!(vectors_count >= 1);
+
+            let chunks = self.read_ranges_count(vector_offset, vectors_count);
+            let length = vectors_count * self.config.dim;
+
+            self.read_ranges(vector_offset, vectors_count).map(
+                move |(write_offset, chunk_idx, range)| {
+                    let meta = ReadMeta {
+                        idx,
+                        write_offset,
+                        chunks,
+                        length,
+                    };
+
+                    let chunk = &self.chunks[chunk_idx];
+                    (meta, chunk, range)
+                },
+            )
+        });
+
+        let read_iter =
+            UniversalRead::read_multi_iter::<Random, _>(reads).expect("read iterator initialized");
+
+        let mut pending = AHashMap::new();
+
+        for result in read_iter {
+            let (meta, data) = result.expect("multi vector chunk read");
+
+            let ReadMeta {
+                idx,
+                write_offset,
+                chunks,
+                length,
+            } = meta;
+
+            if chunks == 1 {
+                callback(idx, &data);
+                continue;
+            }
+
+            let (buffer, chunks_read) = pending
+                .entry(idx)
+                .or_insert_with(|| (vec![MaybeUninit::uninit(); length], 0));
+
+            buffer[write_offset..write_offset + data.len()].write_copy_of_slice(&data);
+            *chunks_read += 1;
+
+            if *chunks_read >= chunks {
+                let (buffer, _) = pending.remove(&idx).expect("value exists");
+                let buffer = unsafe { assume_init_vec(buffer) };
+
+                callback(idx, &buffer);
+            }
+        }
     }
 
     pub fn flusher(&self) -> Flusher {

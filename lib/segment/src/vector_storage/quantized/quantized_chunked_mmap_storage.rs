@@ -50,12 +50,18 @@ impl quantization::EncodedStorage for QuantizedChunkedMmapStorage {
             .unwrap_or_default()
     }
 
-    fn for_each_in_batch<F>(&self, offsets: &[impl UniversalOffset], callback: F)
+    fn for_each_in_batch<O, F>(&self, offsets: &[O], callback: F)
     where
+        O: UniversalOffset,
         F: FnMut(usize, &[u8]),
     {
-        let offset = MultivectorOffsetWrapper::wrap_slice(offsets);
-        self.data.for_each_in_batch(offset, callback);
+        let offsets = MultivectorOffsetWrapper::wrap_slice(offsets);
+
+        if O::MULTI_VECTOR {
+            self.data.for_each_in_batch_splice(offsets, callback);
+        } else {
+            self.data.for_each_in_batch(offsets, callback);
+        }
     }
 
     fn upsert_vector(

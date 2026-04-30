@@ -21,8 +21,9 @@ use fs_err::File;
 pub trait EncodedStorage {
     fn get_vector_data(&self, offset: impl UniversalOffset) -> Cow<'_, [u8]>;
 
-    fn for_each_in_batch<F>(&self, offsets: &[impl UniversalOffset], mut callback: F)
+    fn for_each_in_batch<O, F>(&self, offsets: &[O], mut callback: F)
     where
+        O: UniversalOffset,
         F: FnMut(usize, &[u8]),
     {
         for (idx, &offset) in offsets.iter().enumerate() {
@@ -62,11 +63,15 @@ pub trait EncodedStorageBuilder {
 }
 
 pub trait UniversalOffset: Copy + fmt::Debug {
+    const MULTI_VECTOR: bool;
+
     fn start(self) -> PointOffsetType;
     fn count(self) -> u32;
 }
 
 impl UniversalOffset for PointOffsetType {
+    const MULTI_VECTOR: bool = false;
+
     fn start(self) -> PointOffsetType {
         self
     }
@@ -77,6 +82,8 @@ impl UniversalOffset for PointOffsetType {
 }
 
 impl UniversalOffset for (PointOffsetType, u32) {
+    const MULTI_VECTOR: bool = true;
+
     fn start(self) -> PointOffsetType {
         let (offset, _) = self;
         offset
