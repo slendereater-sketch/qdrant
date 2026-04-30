@@ -563,6 +563,7 @@ where
     }
 
     fn get_vector(&self, point_offset: impl UniversalOffset) -> Cow<'_, [u8]> {
+        // `QuantizedMultivectorStorage` only expects single-vector offsets
         debug_assert_eq!(point_offset.count(), 1);
 
         let multi_offset = self.offsets.get_offset(point_offset.start());
@@ -573,6 +574,7 @@ where
     where
         F: FnMut(usize, &[u8]),
     {
+        // `QuantizedMultivectorStorage` only expects single-vector offsets
         debug_assert!(offsets.iter().all(|offset| offset.count() == 1));
 
         let offsets: Vec<_> = offsets
